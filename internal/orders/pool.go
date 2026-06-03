@@ -1,61 +1,55 @@
 package orders
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
-func Process(orders []Order, workerCount int) []Result {
-	totalJobs := len(orders) * len(jobTypes)
+func Process(ctx context.Context, orders []Order, workerCount, jobBuffer int) []Result {
+	// jobs = esteira de ENTRADA;
+	//results = esteira de SAÍDA.
+	jobs := make(chan Job, jobBuffer)
+	results := make(chan Result, jobBuffer)
 
-	// jobs  = esteira de ENTRADA (trabalho a fazer).
-	// results = esteira de SAÍDA (trabalho já feito).
-	// O buffer = totalJobs faz os envios nunca bloquearem.
-	jobs := make(chan Job, totalJobs)
-	results := make(chan jobResult, totalJobs)
-
-	// workerCount goroutines em paralelo.
-	// "2 JOBS por vez" — quem estiver livre pega o próximo job do canal.
-	// Iniciamos antes de enfileirar: eles só dormem no `range jobs` até chegar trabalho.
+	// A concorrência é limitada a workerCount.
 	var wg sync.WaitGroup
+	wg.Add(workerCount)
 	for i := 0; i < workerCount; i++ {
-		go worker(i, jobs, results, &wg)
+		go worker(ctx, i, jobs, results, &wg)
 	}
 
-	// Fan-out: cada Order vira um Job por JobType, todos enfileirados no canal.
-	// close(jobs) sinaliza "acabou o trabalho" e encerra o `range jobs` dos workers.
-	wg.Add(totalJobs)
-	for _, o := range orders {
-		for _, t := range jobTypes {
-			jobs <- Job{Order: o, Type: t}
+	// (goroutine à parte pra não travar o consumo de results — se não: deadlock)
+	// select: torna o envio CANCELÁVEL: tenta enfileirar, mas se o ctx for
+	// cancelado primeiro, desiste e sai em vez de travar esperando enviar.
+	go func() {
+		defer close(jobs)
+		for _, o := range orders {
+			select {
+			case jobs <- Job{Order: o}:
+			case <-ctx.Done():
+				return
+			}
 		}
-	}
-	close(jobs)
+	}()
 
-	// Goroutine: espera todos os jobs e fecha results (encerra o range abaixo) sem bloquear o fan-in.
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	// Fan-in: os resultados de cada job chegam fora de ordem, então reagrupamos por OrderID.
-	merged := make(map[uint]*Result, len(orders))
-	for _, o := range orders {
-		merged[o.ID] = &Result{OrderID: o.ID}
-	}
-
-	// OrderID = qual pedido; Type = qual campo preencher.
-	// Assim validate e price do mesmo pedido caem no mesmo Result.
+	// Fan-in: os resultados chegam fora de ordem, então coletamos por OrderID e reordenamos pela ordem de entrada.
+	byID := make(map[uint]Result, len(orders))
 	for r := range results {
-		agg := merged[r.OrderID]
-		switch r.Type {
-		case ValidateJob:
-			agg.Valid = r.Valid
-		case PriceJob:
-			agg.Price = r.Price
-		}
+		byID[r.OrderID] = r
 	}
 
 	out := make([]Result, 0, len(orders))
 	for _, o := range orders {
-		out = append(out, *merged[o.ID])
+		if r, ok := byID[o.ID]; ok {
+			out = append(out, r)
+		} else {
+			out = append(out, Result{OrderID: o.ID, Err: ctx.Err()})
+		}
 	}
 	return out
 }

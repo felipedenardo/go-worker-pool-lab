@@ -1,43 +1,37 @@
 package orders
 
-import "time"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 const processingDelay = 100 * time.Millisecond
 
 const priceDiscount = 5
 
-type JobType string
-
-const (
-	ValidateJob JobType = "validate"
-	PriceJob    JobType = "price"
-)
-
-var jobTypes = []JobType{ValidateJob, PriceJob}
-
 type Job struct {
 	Order Order
-	Type  JobType
 }
 
-type jobResult struct {
-	OrderID uint
-	Type    JobType
-	Valid   bool
-	Price   float64
-}
+// run processa um pedido de ponta a ponta (valida e precifica). Respeita o
+// cancelamento via ctx e devolve um Result que pode carregar um erro.
+func (j Job) run(ctx context.Context) Result {
+	res := Result{OrderID: j.Order.ID}
 
-// run é onde mora a regra de negócio de cada job: o único lugar que sabe COMO
-// validar e COMO precificar. O worker não conhece essa lógica, só chama run().
-func (j Job) run() jobResult {
-	time.Sleep(processingDelay)
-
-	res := jobResult{OrderID: j.Order.ID, Type: j.Type}
-	switch j.Type {
-	case ValidateJob:
-		res.Valid = true
-	case PriceJob:
-		res.Price = j.Order.Price - priceDiscount
+	// Simula trabalho de I/O, mas aborta na hora se o ctx for cancelado.
+	select {
+	case <-time.After(processingDelay):
+	case <-ctx.Done():
+		res.Err = ctx.Err()
+		return res
 	}
+
+	if j.Order.Price <= 0 {
+		res.Err = fmt.Errorf("pedido %d: preço inválido (%.2f)", j.Order.ID, j.Order.Price)
+		return res
+	}
+	res.Valid = true
+	res.Price = j.Order.Price - priceDiscount
 	return res
 }
