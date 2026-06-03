@@ -1,0 +1,17 @@
+# IDE / ferramentas
+.idea/
+.vscode/
+.claude/
+
+# Compiled binaries / build output
+/bin/
+/dist/
+*.exe
+*.out
+
+# Go test & coverage artifacts
+*.test
+coverage.out
+
+# OS noise
+.DS_Store
